@@ -1,0 +1,15 @@
+# Build output
+/bin/
+/kvcache
+/loadgen
+
+# Test and coverage artifacts
+coverage.out
+coverage.html
+*.test
+*.prof
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
