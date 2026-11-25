@@ -74,6 +74,11 @@ jobs:
     name: CD - Docker & Deploy
     runs-on: ubuntu-latest
     needs: ci
+    env:
+      # Publish only for pushes to main, and only once the DockerHub secrets
+      # exist. Without them the job still builds, scans and smoke-tests the
+      # image, then skips publishing with a notice instead of failing.
+      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
 
     steps:
       - name: Checkout code
@@ -97,15 +102,21 @@ jobs:
       - name: Container smoke test
         run: make smoke-test
 
+      - name: Explain skipped publish
+        if: env.PUBLISH != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: >-
+          echo "::notice title=DockerHub publish skipped::Add the DOCKERHUB_USERNAME
+          and DOCKERHUB_TOKEN repository secrets to push the image."
+
       - name: Login to DockerHub
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Push to DockerHub (latest + commit SHA)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: env.PUBLISH == 'true'
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
@@ -118,7 +129,7 @@ jobs:
       # Optional: enable by setting the repository variable DEPLOY_ENABLED=true
       # and the secret KUBE_CONFIG (a base64-encoded kubeconfig).
       - name: Configure kubectl
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+        if: env.PUBLISH == 'true' && vars.DEPLOY_ENABLED == 'true'
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         run: |
@@ -127,7 +138,7 @@ jobs:
           chmod 600 "$HOME/.kube/config"
 
       - name: Deploy to Kubernetes
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+        if: env.PUBLISH == 'true' && vars.DEPLOY_ENABLED == 'true'
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |

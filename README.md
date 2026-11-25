@@ -243,7 +243,8 @@ request ──► fasthttp server ──► Handler.Serve (switch on path)
 
 ### Triggers
 
-- **Push to main**: Full CI/CD with DockerHub push
+- **Push to main**: Full CI/CD with DockerHub push (publishing is skipped
+  with a notice until the DockerHub secrets below are configured)
 - **Pull Request**: CI/CD without DockerHub push
 - **Manual**: `workflow_dispatch`
 - **Weekly**: CodeQL re-scan; Dependabot update PRs
