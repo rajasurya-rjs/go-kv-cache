@@ -1,0 +1,12 @@
+# Keep the build context small: only Go sources and module files are needed.
+.git
+.github
+bin
+k8s
+scripts
+coverage.out
+coverage.html
+*.md
+Dockerfile
+.dockerignore
+Makefile
