@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: build a static Go binary.
 # ---------------------------------------------------------------------------
-FROM golang:1.26.11-alpine AS builder
+FROM golang:1.27.4-alpine AS builder
 
 WORKDIR /src
 
