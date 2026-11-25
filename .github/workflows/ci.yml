@@ -1,0 +1,137 @@
+# CI/CD pipeline
+#
+#   CI - Build & Test     lint, SAST (gosec), SCA (govulncheck), race-enabled
+#                         tests with a 75% coverage gate, build
+#   CD - Docker & Deploy  Docker build, Trivy image scan, container smoke test,
+#                         push to DockerHub (main only), optional k8s rollout
+#
+# Branch protection should require both job names above
+# (see scripts/setup-branch-protection.sh).
+#
+# Third-party actions are pinned to full commit SHAs (version in a comment),
+# so a moved or compromised tag cannot change what runs in this pipeline.
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch or PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI - Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go (version from go.mod)
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download and verify dependencies
+        run: go mod download && go mod verify
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+
+      - name: Lint (golangci-lint)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+          args: --timeout=5m
+
+      - name: SAST (gosec)
+        uses: securego/gosec@5eb1d104ef85ff2c905c877eb600e8c1dee33a22 # v2.30.0
+        with:
+          args: ./...
+
+      - name: SCA (govulncheck)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+          govulncheck ./...
+
+      - name: Unit tests with race detector and 75% coverage gate
+        run: make test-coverage
+
+      - name: Build binary
+        run: make build
+
+  cd:
+    name: CD - Docker & Deploy
+    runs-on: ubuntu-latest
+    needs: ci
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build Docker image
+        run: make docker-build
+
+      - name: Image size
+        run: docker image ls kv-cache:latest --format 'kv-cache:latest is {{.Size}}'
+
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: kv-cache:latest
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Container smoke test
+        run: make smoke-test
+
+      - name: Login to DockerHub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push to DockerHub (latest + commit SHA)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          IMAGE="$DOCKERHUB_USERNAME/kv-cache"
+          docker tag kv-cache:latest "$IMAGE:latest"
+          docker tag kv-cache:latest "$IMAGE:$GITHUB_SHA"
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:$GITHUB_SHA"
+
+      # Optional: enable by setting the repository variable DEPLOY_ENABLED=true
+      # and the secret KUBE_CONFIG (a base64-encoded kubeconfig).
+      - name: Configure kubectl
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Deploy to Kubernetes
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          IMAGE="$DOCKERHUB_USERNAME/kv-cache:$GITHUB_SHA"
+          sed -i "s|IMAGE_PLACEHOLDER|$IMAGE|g" k8s/deployment.yaml
+          kubectl apply -f k8s/
+          kubectl rollout status deployment/kv-cache --timeout=120s
