@@ -1,0 +1,85 @@
+# Kubernetes Deployment for the KV cache.
+#
+# Data lives in process memory, so each pod is an independent cache. Keep
+# `replicas: 1` unless clients shard keys across pods themselves (for example
+# with consistent hashing); otherwise reads would hit pods that never saw
+# the write.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kv-cache
+  labels:
+    app: kv-cache
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate) avoids two pods briefly serving different
+  # partial views of the cache.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kv-cache
+  template:
+    metadata:
+      labels:
+        app: kv-cache
+    spec:
+      # Must exceed SHUTDOWN_TIMEOUT so in-flight requests can drain.
+      terminationGracePeriodSeconds: 15
+      automountServiceAccountToken: false # the app never calls the k8s API
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kv-cache
+          # Replaced with <dockerhub-user>/kv-cache:<git-sha> by the CD job.
+          image: IMAGE_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 7171
+          env:
+            - name: PORT
+              value: "7171"
+            # Measured cost: ~125 B per entry for short keys/values and
+            # ~580 B at the 256-byte maximum, so 500k entries fit in the
+            # memory limit below even in the worst case.
+            - name: CACHE_CAPACITY
+              value: "500000"
+            - name: SHUTDOWN_TIMEOUT
+              value: "10s"
+            # Soft heap limit below the container limit: the Go GC works
+            # harder as it approaches this instead of being OOM-killed.
+            - name: GOMEMLIMIT
+              value: "400MiB"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Restart the container if it stops answering.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 2
+          # Only send traffic once the server is accepting connections.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 2
